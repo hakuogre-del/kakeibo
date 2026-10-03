@@ -166,9 +166,7 @@ input.num{font-family:var(--f-num)}
 .scanline{position:relative;width:96px;height:128px;border-radius:6px;overflow:hidden}
 .scanline::after{content:"";position:absolute;left:0;right:0;height:3px;background:var(--accent);box-shadow:0 0 12px var(--accent);top:0;animation:scan 1.6s ease-in-out infinite alternate}
 @keyframes scan{to{top:calc(100% - 3px)}}
-.prog{height:6px;border-radius:999px;background:var(--sunk);overflow:hidden}
-.prog i{display:block;height:100%;background:var(--accent);width:0;transition:width .3s}
-@media (prefers-reduced-motion:reduce){.scanline::after{animation:none;top:50%}.bar i,.prog i{transition:none}}
+@media (prefers-reduced-motion:reduce){.scanline::after{animation:none;top:50%}.bar i{transition:none}}
 details.raw{font-size:12.5px;color:var(--muted)}
 details.raw pre{white-space:pre-wrap;font-family:var(--f-num);font-size:11.5px;background:var(--surface);border:1px solid var(--rule);border-radius:10px;padding:10px;max-height:220px;overflow:auto;color:var(--ink)}
 .hint{font-size:12.5px;color:var(--muted)}
@@ -185,6 +183,7 @@ details.raw pre{white-space:pre-wrap;font-family:var(--f-num);font-size:11.5px;b
 .tabs{display:grid;grid-template-columns:1fr 1fr;background:var(--sunk);border-radius:10px;padding:3px}
 .tabs button{border:0;background:transparent;border-radius:8px;padding:8px;font-weight:700;color:var(--muted)}
 .tabs button[aria-selected="true"]{background:var(--surface);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.08)}
+.note{font-size:13px;background:var(--accent-soft);border-radius:10px;padding:10px 12px}
 .ok-msg{font-size:13.5px;color:var(--ok)}
 .loading{min-height:60vh;display:grid;place-items:center;color:var(--muted)}
 @media (max-width:420px){.stat .v{font-size:15px}.item{grid-template-columns:minmax(0,1fr) 92px 30px}}
@@ -206,6 +205,7 @@ details.raw pre{white-space:pre-wrap;font-family:var(--f-num);font-size:11.5px;b
     </div>
     <label class="f">メールアドレス<input type="email" id="authEmail" autocomplete="email" required></label>
     <label class="f">パスワード（6文字以上）<input type="password" id="authPass" autocomplete="current-password" minlength="6" required></label>
+    <div class="note" id="inAppNote" hidden>アプリ内のブラウザで開いています。ここではログインが保存されないことがあるので、右上のメニューから「Safariで開く」（Androidは「Chromeで開く」）を選んでください。</div>
     <div class="err" id="authErr" hidden></div>
     <div class="ok-msg" id="authOk" hidden></div>
     <button class="btn primary" type="submit" id="authSubmit">ログイン</button>
@@ -300,9 +300,38 @@ details.raw pre{white-space:pre-wrap;font-family:var(--f-num);font-size:11.5px;b
 /* ---------- config (publishable key: safe to ship; rows are protected by row-level security) ---------- */
 const SUPABASE_URL = "https://gyqbxaqgayywrvhrqswu.supabase.co";
 const SUPABASE_KEY = "sb_publishable_gvhKGwHDpmUH2msFutnuEw_KWGoEY2D";
-const TESSERACT_SRC = "https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.min.js";
 
-const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {auth: {persistSession: true, autoRefreshToken: true, detectSessionInUrl: true}});
+/* ---------- login persistence ----------
+   The session lives in localStorage with a copy in IndexedDB, so a browser that drops one
+   (storage pressure, an in-app browser reset) can restore it from the other. */
+const IDB = (() => {
+  let dbp = null;
+  const open = () => dbp ||= new Promise((res, rej) => {
+    const r = indexedDB.open("kakeibo-auth", 1);
+    r.onupgradeneeded = () => r.result.createObjectStore("kv");
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  });
+  const tx = async (mode, fn) => { const db = await open(); return new Promise((res, rej) => { const t = db.transaction("kv", mode); const q = fn(t.objectStore("kv")); t.oncomplete = () => res(q?.result); t.onerror = () => rej(t.error); }); };
+  return {
+    get: k => tx("readonly", s => s.get(k)).catch(() => null),
+    set: (k, v) => tx("readwrite", s => s.put(v, k)).catch(() => {}),
+    del: k => tx("readwrite", s => s.delete(k)).catch(() => {}),
+  };
+})();
+const authStorage = {
+  async getItem(k){
+    let v = null;
+    try { v = localStorage.getItem(k); } catch {}
+    if (v == null) { v = (await IDB.get(k)) ?? null; if (v != null) try { localStorage.setItem(k, v); } catch {} }
+    return v;
+  },
+  async setItem(k, v){ try { localStorage.setItem(k, v); } catch {} await IDB.set(k, v); },
+  async removeItem(k){ try { localStorage.removeItem(k); } catch {} await IDB.del(k); },
+};
+// Ask the browser not to evict our storage (granted automatically for home-screen apps on most phones).
+try { navigator.storage?.persist?.(); } catch {}
+
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {auth: {persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, storage: authStorage, storageKey: "kakeibo-auth"}});
 
 /* ---------- categories ---------- */
 const CATS = [
@@ -398,6 +427,7 @@ $("authForm").addEventListener("submit", async ev => {
   $("authErr").hidden = true; $("authOk").hidden = true;
   if (!/^\S+@\S+\.\S+$/.test(email)) { $("authErr").textContent = "メールアドレスを正しく入れてください。"; $("authErr").hidden = false; return; }
   if (password.length < 6) { $("authErr").textContent = "パスワードは6文字以上にしてください。"; $("authErr").hidden = false; return; }
+  try { localStorage.setItem("kakeibo-email", email); } catch {}
   const btn = $("authSubmit"); btn.disabled = true;
   try {
     if (authMode === "login") {
@@ -634,7 +664,7 @@ function openEditor(d, opts = {}){
   s.innerHTML = `
     <div class="sheet-head"><h3 id="sheetTitle">${opts.scanning ? "レシートを読み取り中" : isNew ? (d.source === "receipt" ? "読み取り結果を確認" : "支出を記録") : "支出を編集"}</h3><button class="x" id="sheetX" aria-label="閉じる">×</button></div>
     ${opts.imageUrl ? `<div class="scan"><div class="${opts.scanning ? "scanline" : ""}"><img src="${opts.imageUrl}" alt="撮影したレシート"></div><div class="status" id="scanStatus">${opts.scanning
-      ? `<b>文字を読み取っています</b><div class="prog"><i id="scanProg"></i></div><span class="hint" id="scanMsg">準備中…（初回だけ読み取り用データを取得するので少し時間がかかります）</span>`
+      ? `<b>AIがレシートを読み取っています</b><span class="hint">品目・金額・ジャンルを分析中です。5〜20秒ほどかかります。</span>`
       : `<b>読み取りました</b><span class="hint">品目・金額・ジャンルを確認して、違っていれば直してください。</span>`}</div></div>` : ""}
     <div id="formArea" ${opts.scanning ? "hidden" : ""}>
       <div style="display:grid;gap:12px">
@@ -647,7 +677,6 @@ function openEditor(d, opts = {}){
         <div class="sum-line"><span>合計</span><span class="num" id="fSum">¥0</span></div>
         <div class="mismatch" id="mismatch" hidden></div>
         <label class="f">メモ（任意）<input id="fMemo" value="${esc(d.memo || "")}"></label>
-        ${d.rawText ? `<details class="raw"><summary>読み取った文字を見る</summary><pre>${esc(d.rawText)}</pre></details>` : ""}
         <div class="err" id="fErr" hidden></div>
         <div class="sheet-foot">
           ${!isNew ? `<button class="btn danger" id="delBtn">削除</button>` : ""}
@@ -741,94 +770,39 @@ function openPasswordReset(){
   };
 }
 
-/* ================= receipt OCR (on-device, Tesseract.js) ================= */
-let tessLoad = null, worker = null, progressSink = null;
-function loadTesseract(){
-  return tessLoad ||= new Promise((res, rej) => {
-    const s = document.createElement("script"); s.src = TESSERACT_SRC; s.onload = res; s.onerror = () => { tessLoad = null; rej(new Error("load")); }; document.head.appendChild(s);
-  });
-}
-async function getWorker(){
-  if (worker) return worker;
-  await loadTesseract();
-  worker = await Tesseract.createWorker("jpn", 1, {logger: m => progressSink?.(m)});
-  await worker.setParameters({tessedit_pageseg_mode: "6", preserve_interword_spaces: "1"});
-  return worker;
-}
-
-// Downscale to ~1800px, grayscale and stretch contrast: thermal-paper photos are usually grey-on-grey.
+/* ================= receipt reading (Gemini via the scan-receipt edge function) ================= */
+// Downscale to ~1600px JPEG so the upload is small but digits stay sharp.
 async function prepImage(file){
   const url = URL.createObjectURL(file);
   try {
     const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
-    const max = 1800, k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+    const max = 1600, k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
     const c = document.createElement("canvas"); c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
-    const ctx = c.getContext("2d", {willReadFrequently: true}); ctx.drawImage(img, 0, 0, c.width, c.height);
-    const preview = c.toDataURL("image/jpeg", .6);
-    const id = ctx.getImageData(0, 0, c.width, c.height), px = id.data, hist = new Uint32Array(256);
-    for (let i = 0; i < px.length; i += 4) { const g = (px[i] * 299 + px[i+1] * 587 + px[i+2] * 114) / 1000 | 0; px[i] = g; hist[g]++; }
-    const n = px.length / 4; let lo = 0, hi = 255, acc = 0;
-    for (; lo < 255; lo++) { acc += hist[lo]; if (acc > n * .02) break; }
-    acc = 0; for (; hi > 0; hi--) { acc += hist[hi]; if (acc > n * .02) break; }
-    const span = Math.max(1, hi - lo);
-    for (let i = 0; i < px.length; i += 4) { const v = Math.max(0, Math.min(255, (px[i] - lo) * 255 / span)); px[i] = px[i+1] = px[i+2] = v; }
-    ctx.putImageData(id, 0, 0);
-    return {canvas: c, preview};
+    c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+    const dataUrl = c.toDataURL("image/jpeg", .88);
+    return {base64: dataUrl.split(",")[1], preview: c.toDataURL("image/jpeg", .5)};
   } finally { URL.revokeObjectURL(url); }
 }
 
-const Z2H = s => s.replace(/[０-９Ａ-Ｚａ-ｚ]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
-  .replace(/[￥]/g, "¥").replace(/[，、]/g, ",").replace(/[．]/g, ".").replace(/[－ー−‐](?=\d)/g, "-").replace(/[＊]/g, "*").replace(/[　]/g, " ");
-// Tesseract puts spaces between Japanese characters; drop them unless they separate ASCII words.
-const squeeze = s => s.replace(/([^\x00-\x7F])\s+(?=[^\x00-\x7F])/g, "$1").replace(/\s{2,}/g, " ").trim();
+const SCAN_ERR = {
+  no_key: "AI読み取りの設定（GeminiのAPIキー）がまだ終わっていません。設定が済むまでは手入力で記録してください。",
+  bad_key: "AI読み取りのAPIキーが正しくないようです。設定したキーを確認してください。",
+  quota: "AI読み取りの無料枠を一時的に使い切りました。1分ほど待つか、明日もう一度お試しください。",
+  forbidden: "このアカウントではAI読み取りを使えない設定になっています。",
+  unauthorized: "ログインの有効期限が切れました。ログインし直してください。",
+  bad_image: "画像が大きすぎるか壊れています。撮り直してください。",
+  bad_request: "画像を読み取れませんでした。レシート全体が写るように撮り直してください。",
+  network: "通信できませんでした。電波の良い場所でもう一度お試しください。",
+};
 
-const SKIP = /小計|合計|総計|計\s*$|税|預|釣|おつり|ポイント|ﾎﾟｲﾝﾄ|pt|対象|現金|クレジット|カード|電子マネー|交通系|PayPay|ペイペイ|楽天|d払|iD|QUIC|Suica.*残|残高|点数|買上|お買上|TEL|電話|℡|No\.|NO\.|レジ|責|領収|伝票|取引|承認|番号|会員|担当|〒|http|www|釣銭|お預|支払|ご利用|いらっしゃいませ|ありがとう|またのご来店|登録番号|インボイス|^\s*T\d{6,}/i;
-const QTY = /(\d+)\s*(個|コ|点|本|袋|パック|枚)\s*[xX×@*]|[@＠]\s*\d|単\s*\d|\d+\s*[xX×]\s*\d+/;
-const PRICE_END = /(?:[¥\\Y]\s*)?(-?\d{1,3}(?:[,.]\d{3})+|-?\d{1,6})\s*円?\s*[*※軽外内税8%\sA-Za-z]{0,6}$/;
-
-function parseReceipt(raw){
-  const lines = raw.split(/\n/).map(l => squeeze(Z2H(l))).filter(l => l.length > 0);
-  // store: first meaningful line near the top
-  let store = "";
-  for (const l of lines.slice(0, 6)) {
-    if (/\d{2,}[-()]\d{2,}|\d{4}\s*[年\/.-]|TEL|電話|〒|領収|レシート|いらっしゃ|ありがと|^[\d\s¥\\.,:\-]+$/i.test(l)) continue;
-    const letters = (l.match(/[A-Za-z぀-ヿ一-鿿]/g) || []).length;
-    if (letters >= 2) { store = l.replace(/[^\w぀-ヿ一-鿿・&\-\s]/g, "").trim().slice(0, 40); break; }
+async function scanReceipt(base64){
+  const {data, error} = await sb.functions.invoke("scan-receipt", {body: {image: base64, mime: "image/jpeg", today: todayStr()}});
+  if (error) {
+    let code = "network";
+    try { const j = await error.context?.json?.(); code = j?.error || code; } catch {}
+    throw {code};
   }
-  // date
-  let date = null;
-  for (const l of lines) {
-    let m = l.match(/(20\d{2})\s*[年\/.\-]\s*(\d{1,2})\s*[月\/.\-]\s*(\d{1,2})/);
-    if (!m) { const r = l.match(/令和\s*(\d{1,2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})/); if (r) m = [0, 2018 + Number(r[1]), r[2], r[3]]; }
-    if (m) { const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]); if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) { date = `${y}-${pad(mo)}-${pad(d)}`; break; } }
-  }
-  // printed total: prefer 合計 lines that are not 小計
-  let total = null;
-  for (const l of lines) {
-    if (/小計/.test(l) || !/合計|御会計|お会計|ご請求|お買上計|お支払金額|総額/.test(l)) continue;
-    const nums = (l.match(/\d{1,3}(?:[,.]\d{3})+|\d+/g) || []).map(s => toInt(s.replace(/[.,]/g, ""))).filter(n => n > 0 && n < 1e7);
-    if (nums.length) { total = Math.max(...nums); break; }
-  }
-  // items
-  const items = [];
-  for (const l of lines) {
-    if (SKIP.test(l) || QTY.test(l) || /\d{2,4}\s*[年\/.\-]\s*\d{1,2}\s*[月\/.\-]|\d{1,2}:\d{2}/.test(l)) continue;
-    const m = l.match(PRICE_END); if (!m) continue;
-    const amount = toInt(m[1].replace(/[.,]/g, ""));
-    let name = l.slice(0, m.index).replace(/^[\d\s\-*#・.:]+/, "").replace(/[\s*※・.:¥\\]+$/, "").trim();
-    if (!amount || Math.abs(amount) > 300000) continue;
-    if (/値引|割引|引き|クーポン|OFF/i.test(name)) {
-      const v = -Math.abs(amount); const last = items.at(-1);
-      if (last && last.amount + v > 0) last.amount += v; else items.push({name: "値引き", amount: v, category: last?.category || "misc"});
-      continue;
-    }
-    const letters = (name.match(/[A-Za-z぀-ヿ一-鿿]/g) || []).length;
-    if (letters < 1 || name.length > 40) continue;
-    items.push({name: name.slice(0, 40), amount, category: guessCat(name, store)});
-  }
-  // a line equal to the total that slipped through (e.g. "合計" misread) is usually the last item; drop it
-  if (total && items.length > 1 && items.at(-1).amount === total && sumItems(items.slice(0, -1)) === total) items.pop();
-  return {store, date, total, items};
+  return data.result;
 }
 
 async function handlePhoto(file){
@@ -839,30 +813,27 @@ async function handlePhoto(file){
   catch { toast("この画像は開けませんでした。JPEGかPNGの写真でお試しください"); return; }
   const d = newDraft("receipt");
   openEditor(d, {scanning: true, imageUrl: prep.preview});
-  progressSink = m => {
-    if (token !== scanToken) return;
-    const label = {"loading tesseract core": "読み取りエンジンを準備中", "initializing tesseract": "準備中", "loading language traineddata": "日本語データを取得中（初回のみ）", "initializing api": "準備中", "recognizing text": "文字を読み取り中"}[m.status] || "処理中";
-    if ($("scanMsg")) $("scanMsg").textContent = `${label}… ${Math.round((m.progress || 0) * 100)}%`;
-    if ($("scanProg")) $("scanProg").style.width = (m.status === "recognizing text" ? 30 + 70 * (m.progress || 0) : 30 * (m.progress || 0)) + "%";
+  const retryButtons = `<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn small" id="retake">撮り直す</button><button class="btn small" id="toManual">手入力にする</button></div>`;
+  const wireRetry = () => {
+    $("retake").onclick = () => { closeSheet(); $("camInput").click(); };
+    $("toManual").onclick = () => openEditor(newDraft("manual"));
   };
   try {
-    const w = await getWorker();
-    const {data} = await w.recognize(prep.canvas);
+    const r = await scanReceipt(prep.base64);
     if (token !== scanToken) return;
-    const r = parseReceipt(data.text || "");
-    d.store = r.store; if (r.date) d.date = r.date;
-    d.items = r.items; d.printedTotal = r.total; d.rawText = (data.text || "").trim();
-    if (!d.items.length) {
-      d.items = [{name: "", amount: r.total || "", category: matchRules(STORE_RULES, r.store) || "misc"}];
-      openEditor(d, {imageUrl: prep.preview});
-      $("scanStatus").innerHTML = `<b>品目をうまく拾えませんでした</b><span class="hint">${r.total ? "合計金額だけ入れておきました。" : ""}品目と金額を入力してください。明るい場所で、レシートを真上からまっすぐ撮ると読み取りやすくなります。</span>`;
-      return;
+    if (!r || r.is_receipt === false || !Array.isArray(r.items) || !r.items.length) {
+      $("scanStatus").innerHTML = `<b>レシートが見つかりませんでした</b><span class="hint">レシート全体が明るく写るように撮り直してください。</span>${retryButtons}`;
+      wireRetry(); return;
     }
+    d.store = String(r.store || "").slice(0, 60);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(r.date || "")) d.date = r.date;
+    d.items = r.items.map(it => ({name: String(it.name || "").slice(0, 60), amount: toInt(it.amount), category: CAT[it.category] ? it.category : guessCat(it.name, r.store)}));
+    d.printedTotal = toInt(r.total) || null;
     openEditor(d, {imageUrl: prep.preview});
   } catch (e) {
     if (token !== scanToken) return;
-    $("scanStatus").innerHTML = `<b>読み取りに失敗しました</b><span class="hint">読み取り用のデータを取得できませんでした。電波の良い場所でもう一度試すか、手入力してください。</span><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn small" id="toManual">手入力にする</button></div>`;
-    $("toManual").onclick = () => openEditor(newDraft("manual"));
+    $("scanStatus").innerHTML = `<b>読み取りに失敗しました</b><span class="hint">${esc(SCAN_ERR[e?.code] || SCAN_ERR.network)}</span>${retryButtons}`;
+    wireRetry();
   }
 }
 
@@ -881,11 +852,14 @@ $("csvBtn").onclick = () => {
 $("prevM").onclick = () => { state.month = shiftMonth(state.month, -1); render(); };
 $("nextM").onclick = () => { state.month = shiftMonth(state.month, 1); render(); };
 $("manualBtn").onclick = () => openEditor(newDraft("manual"));
-$("camBtn").onclick = () => { $("camInput").click(); loadTesseract().catch(() => {}); };
-$("pickBtn").onclick = () => { $("pickInput").click(); loadTesseract().catch(() => {}); };
+$("camBtn").onclick = () => $("camInput").click();
+$("pickBtn").onclick = () => $("pickInput").click();
 for (const id of ["camInput", "pickInput"]) $(id).addEventListener("change", e => { const f = e.target.files?.[0]; e.target.value = ""; handlePhoto(f); });
 
 showView("boot");
+try { const em = localStorage.getItem("kakeibo-email"); if (em) $("authEmail").value = em; } catch {}
+// In-app browsers (LINE, Instagram, …) throw away logins; point people to Safari / Chrome.
+if (/Line\/|FBAN|FBAV|Instagram|MicroMessenger|GSA\/|YJApp/i.test(navigator.userAgent)) $("inAppNote").hidden = false;
 sb.auth.getSession().then(({data}) => { if (!data.session) showView("auth"); });
 })();
 </script>

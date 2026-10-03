@@ -4,7 +4,7 @@
 
 - **URL**: https://hakuogre-del.github.io/kakeibo/ （スマホはホーム画面に追加するとアプリのように使える）
 - **データ**: Supabase（プロジェクト `kakeibo` / `gyqbxaqgayywrvhrqswu`）。メール＋パスワードでログインし、同じアカウントならどの端末でも同じ記録が見える。行レベルセキュリティで本人の行しか読み書きできない。
-- **レシート読み取り**: [Tesseract.js](https://github.com/naptha/tesseract.js) によるスマホ内OCR。無料・APIキー不要。読み取った文字から店名・日付・品目・金額・合計を抜き出し、キーワードと店名でジャンルを推定する。
+- **レシート読み取り**: Supabase Edge Function `scan-receipt`（`supabase/functions/scan-receipt`）が Google Gemini API（無料枠）で画像を解析し、店名・日付・品目・税込金額・ジャンル・合計をJSONで返す。APIキーは Supabase のシークレット `GEMINI_API_KEY` に置き、ブラウザには出さない。ログイン中のユーザーしか呼べない。任意で `ALLOWED_EMAILS`（カンマ区切り）を設定すると使える人を限定できる。
 
 ## ファイル
 
@@ -12,6 +12,7 @@
 |---|---|
 | `index.html` | アプリ本体（1ファイル完結） |
 | `manifest.webmanifest`, `icon*.{svg,png}` | ホーム画面追加用 |
+| `supabase/functions/scan-receipt/index.ts` | AIレシート読み取り（Gemini） |
 
 ## テーブル
 
